@@ -6,12 +6,28 @@ const FADE = 1.5
 const SHOWER_START = 2.5
 // The petals fall in slight slow motion.
 const SHOWER_SPEED = 0.8
+// A video can refuse to play: iOS caps how many play at once across all of Safari's tabs, so a
+// guest who has opened the link many times can hit it, and Low Power Mode blocks them outright.
+// The page then moves on regardless: B fades in once A would have ended, and the tour starts once
+// the shower would have come down. Both in seconds from the reveal.
+const A_STALL = 7
+const SHOWER_STALL = 13
+
+// Frees a finished video's decoder, of which iOS has few; its poster stands in.
+export function release(video) {
+  video.pause()
+  video.removeAttribute('src')
+  video.load()
+}
 
 // A plays once and holds its last frame. B (the flower shower) fades in over A's last 1.5 s while
 // paused on its clear-sky frame, then plays and loops, so the first petals are seen falling from
-// the top. If B is not buffered by then, A holds until it is. `onShowerFalling` runs once, as B
-// first wraps round: the toss has come down and its petals are falling past the couple.
+// the top, and A, hidden beneath it, is released. If B is not buffered by then, A holds until it
+// is. `onShowerFalling` runs once, as B first wraps round: the toss has come down and its petals
+// are falling past the couple. Returns whether B has been started, for pausing it off screen.
 function crossfadeAfterFirstPass(a, b, onShowerFalling) {
+  let started = false
+  setTimeout(onShowerFalling, SHOWER_STALL * 1000)
   b.preload = 'auto'
   b.load()
 
@@ -35,6 +51,7 @@ function crossfadeAfterFirstPass(a, b, onShowerFalling) {
     }
     a.addEventListener('timeupdate', onTime)
     a.addEventListener('ended', resolve, { once: true })
+    setTimeout(resolve, A_STALL * 1000)
   })
 
   let last = SHOWER_START
@@ -51,8 +68,10 @@ function crossfadeAfterFirstPass(a, b, onShowerFalling) {
   Promise.all([ready, nearEnd]).then(async () => {
     await animate(b, { opacity: 1, duration: FADE * 1000, ease: 'inOut(2)' })
     b.playbackRate = SHOWER_SPEED
-    b.play().catch(() => {})
+    started = true
+    b.play().then(() => release(a), () => {})
   })
+  return () => started
 }
 
 // The hero waits hidden under the gate, then surfaces out of the gate video's closing mist.
@@ -70,7 +89,19 @@ export function setupHero(hero, { reduceMotion, onShowerFalling }) {
       return
     }
     a.play().catch(() => {})
-    crossfadeAfterFirstPass(a, b, onShowerFalling)
+    const showering = crossfadeAfterFirstPass(a, b, onShowerFalling)
+    // The shower plays only while the hero is on screen and the tab is in front.
+    let inView = true
+    const follow = () => {
+      if (!showering()) return
+      if (inView && !document.hidden) b.play().catch(() => {})
+      else b.pause()
+    }
+    new IntersectionObserver(([entry]) => {
+      inView = entry.isIntersecting
+      follow()
+    }).observe(hero)
+    document.addEventListener('visibilitychange', follow)
     animate(media, {
       opacity: 1,
       scale: [1.06, 1],
